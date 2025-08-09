@@ -85,7 +85,8 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
 }
 
 function sendVerification(email, token) {
-  const url = `http://localhost:${PORT}/verify/${token}`;
+  const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
+  const url = `${baseUrl}/verify/${token}`;
   if (!transporter) {
     console.log('[DEV] Verification link:', url);
     return Promise.resolve();
