@@ -1,106 +1,59 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Register — Antimatter</title>
-  <link rel="stylesheet" href="/style.css" />
-  <style>
-    /* small inline tweaks so it looks okay standalone */
-    .small-note { color:#9aa0a6; font-size:0.9rem; margin-top:8px; }
-    .success { color:#8f8; }
-    .error { color:#f88; background:#ff5858; color:white; padding:8px; border-radius:6px; margin-bottom:10px; }
-  </style>
-</head>
-<body>
-  <main class="center-card" role="main" aria-labelledby="title">
-    <h2 id="title">Register</h2>
+app.post('/register', async (req, res) => {
+  const { username, email, password } = req.body || {};
 
-    <div id="err" class="error" style="display:none;" aria-live="polite"></div>
+  // Basic validation
+  if (!username || !email || !password) {
+    return res.status(400).send('Please fill out all fields.');
+  }
+  if (password.length < 6) {
+    return res.status(400).send('Password must be at least 6 characters.');
+  }
+  // Simple email regex validation, optional here because frontend already checks it
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).send('Invalid email format.');
+  }
 
-    <form id="register" novalidate>
-      <input id="username" name="username" type="text" placeholder="Choose username" required autocomplete="username" />
-      <input id="email" name="email" type="email" placeholder="Email (for verification)" required autocomplete="email" />
-      <input id="password" name="password" type="password" placeholder="Choose password (min 6 chars)" required autocomplete="new-password" />
-      <button id="submitBtn" type="submit">Create account</button>
-    </form>
-
-    <p id="note" class="small-note">Already registered? <a href="/login">Login</a></p>
-    <p id="success" class="small-note" style="display:none" aria-live="polite"></p>
-  </main>
-
-  <script>
-    (function () {
-      const form = document.getElementById('register');
-      const errEl = document.getElementById('err');
-      const successEl = document.getElementById('success');
-      const submitBtn = document.getElementById('submitBtn');
-
-      function showError(msg) {
-        errEl.style.display = 'block';
-        errEl.textContent = msg;
+  try {
+    // Check if username or email already exists
+    db.get('SELECT id FROM users WHERE username = ? OR email = ?', [username, email], (err, existingUser) => {
+      if (err) {
+        console.error('DB error:', err);
+        return res.status(500).send('Database error');
       }
-      function clearError() {
-        errEl.style.display = 'none';
-        errEl.textContent = '';
-      }
-      function showSuccess(msg) {
-        successEl.style.display = 'block';
-        successEl.className = 'small-note success';
-        successEl.textContent = msg;
+      if (existingUser) {
+        return res.status(400).send('Username or email already taken.');
       }
 
-      function isValidEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
-
-      form.addEventListener('submit', async (ev) => {
-        ev.preventDefault();
-        clearError();
-        successEl.style.display = 'none';
-        const username = (document.getElementById('username').value || '').trim();
-        const email = (document.getElementById('email').value || '').trim();
-        const password = (document.getElementById('password').value || '');
-
-        if (!username || !email || !password) { showError('Please fill out all fields.'); return; }
-        if (!isValidEmail(email)) { showError('Please enter a valid email.'); return; }
-        if (password.length < 6) { showError('Password must be at least 6 characters.'); return; }
-
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Creating…';
-
-        try {
-          // send as urlencoded form (server expects urlencoded)
-          const body = new URLSearchParams();
-          body.append('username', username);
-          body.append('email', email);
-          body.append('password', password);
-
-          const res = await fetch('/register', {
-            method: 'POST',
-            body: body
-          });
-
-          const text = await res.text();
-
-          if (res.status === 201 || res.ok) {
-            // registration accepted — typically verification required
-            showSuccess('Registered — verification email sent. Check your inbox. ');
-            // show helpful link
-            successEl.innerHTML = 'Registered — verification email sent. <a href="/login">Go to login</a>';
-            // clear form
-            form.reset();
-          } else {
-            // show server-provided message when possible
-            showError(text || 'Registration failed. Try again later.');
-          }
-        } catch (err) {
-          console.error('Register error', err);
-          showError('Network error — please try again.');
-        } finally {
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Create account';
+      // Hash password
+      bcrypt.hash(password, 10, (err, hashedPassword) => {
+        if (err) {
+          console.error('Bcrypt error:', err);
+          return res.status(500).send('Server error');
         }
+
+        // Insert new user with verified = 0 (pending verification)
+        const stmt = db.prepare('INSERT INTO users (username, email, password, verified, isAdmin, joinNumber) VALUES (?, ?, ?, 0, 0, NULL)');
+        stmt.run(username, email, hashedPassword, function (err) {
+          if (err) {
+            console.error('DB insert error:', err);
+            return res.status(500).send('Database error');
+          }
+
+          const userId = this.lastID;
+
+          // Here: send verification email with a token
+          // (You’ll need to implement or integrate your email system and token generation)
+          // For now, simulate by logging:
+          console.log(`Send verification email to ${email} with token for user ID ${userId}`);
+
+          // Respond success, 201 Created
+          res.status(201).send('Registered. Verification email sent.');
+        });
       });
-    })();
-  </script>
-</body>
-</html>
+    });
+  } catch (e) {
+    console.error('Unexpected error:', e);
+    res.status(500).send('Server error');
+  }
+});

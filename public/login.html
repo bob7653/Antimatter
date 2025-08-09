@@ -1,19 +1,58 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Login — Antimatter</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <form id="login" class="center-card" method="POST" action="/login">
-    <h2>Login</h2>
-    <div id="err" class="error" style="display:none;"></div>
-    <input name="username" type="text" placeholder="Username" required />
-    <input name="password" type="password" placeholder="Password" required />
-    <button type="submit">Log in</button>
-    <div class="muted">No account? <a href="/register">Register</a></div>
-  </form>
-</body>
-</html>
+app.post('/login', authLimiter, (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).send('Please fill out all fields.');
+
+  // Env admin shortcut (optional)
+  const ADMIN_USER = process.env.ADMIN_USERNAME;
+  const ADMIN_PASS = process.env.ADMIN_PASSWORD;
+  if (ADMIN_USER && ADMIN_PASS && username === ADMIN_USER) {
+    if (password === ADMIN_PASS) {
+      req.session.user = { id: 'env-admin', username: ADMIN_USER, isAdmin: true, joinNumber: null };
+      return req.session.save(err => {
+        if (err) {
+          console.error('Session save error:', err);
+          return res.status(500).send('Server error');
+        }
+        return res.redirect('/admin');
+      });
+    } else {
+      return res.status(400).send('Invalid username or password.');
+    }
+  }
+
+  // Normal user login
+  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
+    if (err) {
+      console.error('DB error:', err);
+      return res.status(500).send('Database error');
+    }
+    if (!user) return res.status(400).send('Invalid username or password.');
+
+    if (!user.verified) {
+      return res.status(403).send('Please verify your email first.');
+    }
+
+    bcrypt.compare(password, user.password, (err, match) => {
+      if (err) {
+        console.error('Bcrypt compare error:', err);
+        return res.status(500).send('Server error');
+      }
+      if (!match) return res.status(400).send('Invalid username or password.');
+
+      req.session.user = {
+        id: user.id,
+        username: user.username,
+        isAdmin: Number(user.isAdmin) === 1,
+        joinNumber: user.joinNumber
+      };
+
+      req.session.save(err => {
+        if (err) {
+          console.error('Session save error:', err);
+          return res.status(500).send('Server error');
+        }
+        return res.redirect(user.isAdmin === 1 ? '/admin' : '/dashboard');
+      });
+    });
+  });
+});
