@@ -1,0 +1,12 @@
+/* Basic centered UI + dark theme */
+body, html { height:100%; margin:0; font-family: Inter, Arial, sans-serif; background:#0f1113; color:#e6eef0; display:flex; align-items:center; justify-content:center; }
+.center-card { background:#16181b; padding:30px; border-radius:10px; width:320px; box-shadow:0 8px 30px rgba(0,0,0,0.6); text-align:center; }
+.center-card input { width:100%; padding:10px; margin:8px 0; border-radius:6px; border:none; background:#232527; color:#eee; }
+.center-card button { width:100%; padding:10px; margin-top:10px; border-radius:6px; border:none; background:#00d3a8; color:#021014; font-weight:700; cursor:pointer; }
+.muted, .muted a { color:#9aa0a6; }
+.error { background:#ff5858; color:white; padding:8px; border-radius:6px; margin-bottom:10px; }
+.card { background:#16181b; padding:20px; border-radius:10px; width:90%; max-width:720px; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+.top-left { position:fixed; left:16px; top:16px; color:#00d3a8; font-weight:700; }
+.card.wide { max-width:1000px; }
+table { width:100%; border-collapse:collapse; margin-top:12px; background:#0f1113; color:#e8eef0; }
+th, td { padding:10px; border-bottom:1px solid rgba(255,255,255,0.03); text-align:left; }

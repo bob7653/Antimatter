@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Antimatter — Dashboard</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;background:#0e0f12;color:#eee;max-width:900px;margin:30px auto;padding:20px}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+    h1{color:#00ff99;margin:0}
+    #userInfo{background:#111;padding:15px;border-radius:8px;margin-bottom:16px}
+    #userList{background:#111;padding:12px;border-radius:8px;max-height:420px;overflow:auto}
+    .userRow{padding:10px;border-bottom:1px solid #1b1b1b;display:flex;justify-content:space-between;align-items:center}
+    .userRow:last-child{border-bottom:none}
+    .searchBar{margin:12px 0}
+    input[type=number], input[type=password], input[type=text]{padding:8px;border-radius:6px;border:1px solid #333;background:#0b0b0b;color:#eee}
+    button{background:#00ff99;color:#032; border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
+    button.secondary{background:#333;color:#eee}
+    #settingsBtn{position:fixed;right:24px;bottom:24px;background:#222;border-radius:50%;width:56px;height:56px;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 20px rgba(0,0,0,0.6);cursor:pointer}
+    #settingsBtn:hover{transform:translateY(-2px)}
+    /* Modal */
+    .modal{position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center}
+    .modalContent{background:#0f1112;padding:20px;border-radius:10px;min-width:320px;color:#eee}
+    label{display:block;margin-top:12px;font-size:0.9rem;color:#ccc}
+    .msg{margin-top:10px;color:#f88}
+    .highlight{background:#2e2a12;color:#fff}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Antimatter</h1>
+    <div>
+      <button id="logoutBtn" class="secondary">Logout</button>
+    </div>
+  </header>
+
+  <div id="userInfo">
+    <div>Welcome, <strong id="usernameDisplay">loading...</strong></div>
+    <div>Join number: <strong id="joinNumberDisplay">—</strong></div>
+  </div>
+
+  <div class="searchBar">
+    <label for="searchInput">Find by join number:</label>
+    <input id="searchInput" type="number" min="1" placeholder="Enter join number" />
+  </div>
+
+  <div id="userList">Loading members...</div>
+
+  <!-- Settings floating button -->
+  <div id="settingsBtn" title="Settings" aria-label="Settings">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style="color:#00ff99"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
+
+  <!-- Modal -->
+  <div id="settingsModal" class="modal" role="dialog" aria-hidden="true">
+    <div class="modalContent">
+      <h3>Settings</h3>
+      <p>Change your password</p>
+      <label for="currentPassword">Current password</label>
+      <input id="currentPassword" type="password" />
+      <label for="newPassword">New password</label>
+      <input id="newPassword" type="password" />
+      <label for="confirmPassword">Confirm new password</label>
+      <input id="confirmPassword" type="password" />
+      <div style="margin-top:12px">
+        <button id="changePwBtn">Change password</button>
+        <button id="closeModal" class="secondary">Close</button>
+      </div>
+      <div id="settingsMsg" class="msg"></div>
+    </div>
+  </div>
+
+  <script>
+    // Elements
+    var usernameEl = document.getElementById('usernameDisplay');
+    var joinNumberEl = document.getElementById('joinNumberDisplay');
+    var userListEl = document.getElementById('userList');
+    var searchInput = document.getElementById('searchInput');
+
+    // Load current logged-in user
+    function loadCurrentUser() {
+      return fetch('/api/user').then(function(res) {
+        if (!res.ok) {
+          window.location.href = '/login';
+          return Promise.reject('Not authenticated');
+        }
+        return res.json();
+      }).then(function(user) {
+        usernameEl.textContent = user.username;
+        joinNumberEl.textContent = user.joinNumber === null || user.joinNumber === undefined ? 'N/A' : user.joinNumber;
+      }).catch(function() {
+        // redirect already triggered
+      });
+    }
+
+    // Load members summary for dashboard (safe fields only)
+    function loadUsers() {
+      userListEl.textContent = 'Loading members...';
+      return fetch('/api/users').then(function(res) {
+        if (!res.ok) {
+          userListEl.textContent = 'Failed to load members.';
+          return;
+        }
+        return res.json().then(function(users) {
+          renderUserList(users || []);
+        });
+      }).catch(function() {
+        userListEl.textContent = 'Network error loading members.';
+      });
+    }
+
+    // Render user list using DOM API (avoid template-literals)
+    function renderUserList(users) {
+      userListEl.innerHTML = '';
+      if (!users || users.length === 0) {
+        userListEl.textContent = 'No members yet.';
+        return;
+      }
+      for (var i = 0; i < users.length; i++) {
+        var u = users[i];
+        var row = document.createElement('div');
+        row.className = 'userRow';
+        // Use joinNumber as id if available, fallback to numeric index
+        var rid = (u.joinNumber !== null && u.joinNumber !== undefined) ? 'user-' + u.joinNumber : 'user-index-' + i;
+        row.id = rid;
+
+        var left = document.createElement('div');
+        left.innerHTML = '<strong>' + escapeHtml(u.username) + '</strong> <span style="color:#999">(#' + (u.joinNumber || '') + ')</span>';
+
+        row.appendChild(left);
+        userListEl.appendChild(row);
+      }
+    }
+
+    // Escape to avoid injection
+    function escapeHtml(s) {
+      if (!s) return '';
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Search handler
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key !== 'Enter') return;
+      var v = Number(e.target.value);
+      if (!v) return;
+      // clear previous highlights
+      var prev = document.querySelectorAll('.highlight');
+      for (var j = 0; j < prev.length; j++) prev[j].classList.remove('highlight');
+
+      var el = document.getElementById('user-' + v);
+      if (el) {
+        el.classList.add('highlight');
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+
+    // Logout button
+    document.getElementById('logoutBtn').addEventListener('click', function() {
+      fetch('/logout', { method: 'POST' }).then(function(res) {
+        return res.json();
+      }).then(function(json) {
+        if (json && json.redirect) window.location.href = json.redirect;
+        else window.location.href = '/login';
+      }).catch(function() { alert('Logout failed'); });
+    });
+
+    // Settings modal logic
+    var settingsBtn = document.getElementById('settingsBtn');
+    var settingsModal = document.getElementById('settingsModal');
+    var closeModal = document.getElementById('closeModal');
+    var changePwBtn = document.getElementById('changePwBtn');
+    var settingsMsg = document.getElementById('settingsMsg');
+
+    settingsBtn.addEventListener('click', function() {
+      settingsModal.style.display = 'flex';
+      settingsModal.setAttribute('aria-hidden', 'false');
+    });
+    closeModal.addEventListener('click', function() {
+      settingsModal.style.display = 'none';
+      settingsModal.setAttribute('aria-hidden', 'true');
+      settingsMsg.textContent = '';
+    });
+    window.addEventListener('click', function(e) {
+      if (e.target === settingsModal) {
+        settingsModal.style.display = 'none';
+        settingsModal.setAttribute('aria-hidden', 'true');
+        settingsMsg.textContent = '';
+      }
+    });
+
+    changePwBtn.addEventListener('click', function() {
+      settingsMsg.style.color = '#f88';
+      settingsMsg.textContent = '';
+      changePwBtn.disabled = true;
+      var currentPassword = document.getElementById('currentPassword').value;
+      var newPassword = document.getElementById('newPassword').value;
+      var confirmPassword = document.getElementById('confirmPassword').value;
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        settingsMsg.textContent = 'Fill all fields';
+        changePwBtn.disabled = false;
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        settingsMsg.textContent = 'New passwords do not match';
+        changePwBtn.disabled = false;
+        return;
+      }
+
+      fetch('/api/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword: currentPassword, newPassword: newPassword })
+      }).then(function(res) {
+        return res.json().then(function(body) { return { ok: res.ok, body: body }; });
+      }).then(function(result) {
+        if (!result.ok) {
+          settingsMsg.textContent = result.body && (result.body.error || result.body.message) ? (result.body.error || result.body.message) : 'Failed to change password';
+        } else {
+          settingsMsg.style.color = '#8f8';
+          settingsMsg.textContent = 'Password changed successfully';
+          // clear inputs
+          document.getElementById('currentPassword').value = '';
+          document.getElementById('newPassword').value = '';
+          document.getElementById('confirmPassword').value = '';
+          setTimeout(function() {
+            settingsModal.style.display = 'none';
+            settingsMsg.style.color = '#f88';
+            settingsMsg.textContent = '';
+          }, 1200);
+        }
+      }).catch(function() {
+        settingsMsg.textContent = 'Network error';
+      }).finally(function() {
+        changePwBtn.disabled = false;
+      });
+    });
+
+    // Initialization
+    (function init() {
+      loadCurrentUser();
+      loadUsers();
+    })();
+  </script>
+</body>
+</html>

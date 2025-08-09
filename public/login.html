@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login — Antimatter</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+  <form id="login" class="center-card" method="POST" action="/login">
+    <h2>Login</h2>
+    <div id="err" class="error" style="display:none;"></div>
+    <input name="username" type="text" placeholder="Username" required />
+    <input name="password" type="password" placeholder="Password" required />
+    <button type="submit">Log in</button>
+    <div class="muted">No account? <a href="/register">Register</a></div>
+  </form>
+
+  <script>
+    // prevent default redirect responses and show messages
+    const form = document.getElementById('login');
+    const err = document.getElementById('err');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.style.display = 'none';
+      const data = new URLSearchParams(new FormData(form));
+      const res = await fetch('/login', { method: 'POST', body: data });
+      if (!res.ok) {
+        const text = await res.text();
+        err.textContent = text;
+        err.style.display = 'block';
+      } else {
+        window.location.href = '/dashboard';
+      }
+    });
+  </script>
+</body></html>

@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Register — Antimatter</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+  <form id="register" class="center-card" method="POST" action="/register">
+    <h2>Register</h2>
+    <div id="err" class="error" style="display:none;"></div>
+    <input name="username" type="text" placeholder="Choose username" required />
+    <input name="email" type="email" placeholder="Email (for verification)" required />
+    <input name="password" type="password" placeholder="Choose password" required />
+    <button type="submit">Create account</button>
+    <div class="muted">Already registered? <a href="/login">Login</a></div>
+  </form>
+
+  <script>
+    const form = document.getElementById('register');
+    const err = document.getElementById('err');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.style.display = 'none';
+      const res = await fetch('/register', { method: 'POST', body: new URLSearchParams(new FormData(form)) });
+      if (!res.ok) {
+        const text = await res.text();
+        err.textContent = text;
+        err.style.display = 'block';
+      } else {
+        // server may redirect to dashboard for auto-verified case, handle both
+        // try go to dashboard
+        window.location.href = '/dashboard';
+      }
+    });
+  </script>
+</body></html>
