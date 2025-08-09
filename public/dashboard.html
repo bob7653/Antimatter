@@ -16,14 +16,16 @@
     input[type=number], input[type=password], input[type=text]{padding:8px;border-radius:6px;border:1px solid #333;background:#0b0b0b;color:#eee}
     button{background:#00ff99;color:#032; border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
     button.secondary{background:#333;color:#eee}
-    #settingsBtn{position:fixed;right:24px;bottom:24px;background:#222;border-radius:50%;width:56px;height:56px;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 20px rgba(0,0,0,0.6);cursor:pointer}
+    #settingsBtn{position:fixed;right:24px;bottom:24px;background:#222;border-radius:50%;width:56px;height:56px;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 20px rgba(0,0,0,0.6);cursor:pointer;z-index:1000}
     #settingsBtn:hover{transform:translateY(-2px)}
     /* Modal */
-    .modal{position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center}
+    .modal{position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:1001}
     .modalContent{background:#0f1112;padding:20px;border-radius:10px;min-width:320px;color:#eee}
     label{display:block;margin-top:12px;font-size:0.9rem;color:#ccc}
     .msg{margin-top:10px;color:#f88}
     .highlight{background:#2e2a12;color:#fff}
+    .kickBtn{background:#ff6b6b;color:#fff;border-radius:6px;padding:6px 8px;margin-left:8px}
+    .userLeft{display:flex;align-items:center;gap:12px}
   </style>
 </head>
 <body>
@@ -46,50 +48,77 @@
 
   <div id="userList">Loading members...</div>
 
-  <!-- Settings floating button -->
+  <!-- Settings floating button (always visible) -->
   <div id="settingsBtn" title="Settings" aria-label="Settings">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style="color:#00ff99"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </div>
 
-  <!-- Modal -->
+  <!-- Modal (can be change-password OR forgot-password depending on auth) -->
   <div id="settingsModal" class="modal" role="dialog" aria-hidden="true">
     <div class="modalContent">
-      <h3>Settings</h3>
-      <p>Change your password</p>
-      <label for="currentPassword">Current password</label>
-      <input id="currentPassword" type="password" />
-      <label for="newPassword">New password</label>
-      <input id="newPassword" type="password" />
-      <label for="confirmPassword">Confirm new password</label>
-      <input id="confirmPassword" type="password" />
-      <div style="margin-top:12px">
-        <button id="changePwBtn">Change password</button>
-        <button id="closeModal" class="secondary">Close</button>
+      <h3 id="modalTitle">Settings</h3>
+
+      <!-- Change password form (shown when logged in) -->
+      <div id="changePwForm">
+        <p>Change your password</p>
+        <label for="currentPassword">Current password</label>
+        <input id="currentPassword" type="password" />
+        <label for="newPassword">New password</label>
+        <input id="newPassword" type="password" />
+        <label for="confirmPassword">Confirm new password</label>
+        <input id="confirmPassword" type="password" />
+        <div style="margin-top:12px">
+          <button id="changePwBtn">Change password</button>
+          <button id="closeModal" class="secondary">Close</button>
+        </div>
+        <div id="settingsMsg" class="msg"></div>
       </div>
-      <div id="settingsMsg" class="msg"></div>
+
+      <!-- Forgot password form (shown when NOT logged in) -->
+      <div id="forgotPwForm" style="display:none">
+        <p>Forgot your password? Enter your email and we'll send a reset link.</p>
+        <label for="forgotEmail">Email</label>
+        <input id="forgotEmail" type="email" />
+        <div style="margin-top:12px">
+          <button id="sendResetBtn">Send reset link</button>
+          <button id="closeModal2" class="secondary">Close</button>
+        </div>
+        <div id="forgotMsg" class="msg"></div>
+      </div>
+
     </div>
   </div>
 
   <script>
-    // Elements
+    // Elements & state
     var usernameEl = document.getElementById('usernameDisplay');
     var joinNumberEl = document.getElementById('joinNumberDisplay');
     var userListEl = document.getElementById('userList');
     var searchInput = document.getElementById('searchInput');
 
-    // Load current logged-in user
+    var currentUser = null; // will hold { id, username, joinNumber, isAdmin } or null
+
+    // Load current logged-in user (compat endpoint /api/user returns null if not logged in)
     function loadCurrentUser() {
       return fetch('/api/user').then(function(res) {
-        if (!res.ok) {
-          window.location.href = '/login';
-          return Promise.reject('Not authenticated');
-        }
         return res.json();
       }).then(function(user) {
-        usernameEl.textContent = user.username;
-        joinNumberEl.textContent = user.joinNumber === null || user.joinNumber === undefined ? 'N/A' : user.joinNumber;
-      }).catch(function() {
-        // redirect already triggered
+        currentUser = user;
+        if (currentUser) {
+          usernameEl.textContent = currentUser.username;
+          joinNumberEl.textContent = (currentUser.joinNumber === null || currentUser.joinNumber === undefined) ? 'N/A' : currentUser.joinNumber;
+        } else {
+          usernameEl.textContent = 'Guest';
+          joinNumberEl.textContent = '—';
+        }
+        // After knowing currentUser, reload users so admin buttons can be displayed
+        loadUsers();
+      }).catch(function(err) {
+        console.error('Failed to load current user', err);
+        currentUser = null;
+        usernameEl.textContent = 'Guest';
+        joinNumberEl.textContent = '—';
+        loadUsers();
       });
     }
 
@@ -109,7 +138,7 @@
       });
     }
 
-    // Render user list using DOM API (avoid template-literals)
+    // Render user list
     function renderUserList(users) {
       userListEl.innerHTML = '';
       if (!users || users.length === 0) {
@@ -120,14 +149,35 @@
         var u = users[i];
         var row = document.createElement('div');
         row.className = 'userRow';
-        // Use joinNumber as id if available, fallback to numeric index
         var rid = (u.joinNumber !== null && u.joinNumber !== undefined) ? 'user-' + u.joinNumber : 'user-index-' + i;
         row.id = rid;
 
         var left = document.createElement('div');
-        left.innerHTML = '<strong>' + escapeHtml(u.username) + '</strong> <span style="color:#999">(#' + (u.joinNumber || '') + ')</span>';
+        left.className = 'userLeft';
+        var nameHtml = '<strong>' + escapeHtml(u.username) + '</strong>';
+        var numHtml = '<span style="color:#999">(#' + (u.joinNumber || '') + ')</span>';
+        left.innerHTML = nameHtml + ' ' + numHtml;
 
         row.appendChild(left);
+
+        // Right-side actions (kick if admin)
+        var right = document.createElement('div');
+        if (currentUser && currentUser.isAdmin) {
+          var kick = document.createElement('button');
+          kick.className = 'kickBtn';
+          kick.textContent = 'Kick';
+          (function(uid, rowEl) {
+            kick.addEventListener('click', function() {
+              if (!confirm('Delete ' + uid + '?')) return;
+              fetch('/api/admin/users/' + uid, { method: 'DELETE' }).then(function(r) {
+                if (r.ok) { rowEl.remove(); alert('Deleted'); } else { alert('Failed to delete'); }
+              }).catch(function() { alert('Network error'); });
+            });
+          })(u.id, row);
+          right.appendChild(kick);
+        }
+
+        row.appendChild(right);
         userListEl.appendChild(row);
       }
     }
@@ -143,51 +193,55 @@
       if (e.key !== 'Enter') return;
       var v = Number(e.target.value);
       if (!v) return;
-      // clear previous highlights
       var prev = document.querySelectorAll('.highlight');
       for (var j = 0; j < prev.length; j++) prev[j].classList.remove('highlight');
-
       var el = document.getElementById('user-' + v);
-      if (el) {
-        el.classList.add('highlight');
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+      if (el) { el.classList.add('highlight'); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     });
 
     // Logout button
     document.getElementById('logoutBtn').addEventListener('click', function() {
-      fetch('/logout', { method: 'POST' }).then(function(res) {
-        return res.json();
-      }).then(function(json) {
-        if (json && json.redirect) window.location.href = json.redirect;
-        else window.location.href = '/login';
+      fetch('/logout', { method: 'POST' }).then(function(res) { return res.json(); }).then(function(json) {
+        if (json && json.redirect) window.location.href = json.redirect; else window.location.href = '/login';
       }).catch(function() { alert('Logout failed'); });
     });
 
-    // Settings modal logic
+    // Settings modal logic (supports both change-password and forgot-password)
     var settingsBtn = document.getElementById('settingsBtn');
     var settingsModal = document.getElementById('settingsModal');
     var closeModal = document.getElementById('closeModal');
+    var closeModal2 = document.getElementById('closeModal2');
     var changePwBtn = document.getElementById('changePwBtn');
     var settingsMsg = document.getElementById('settingsMsg');
 
-    settingsBtn.addEventListener('click', function() {
+    var forgotPwForm = document.getElementById('forgotPwForm');
+    var changePwForm = document.getElementById('changePwForm');
+    var modalTitle = document.getElementById('modalTitle');
+    var sendResetBtn = document.getElementById('sendResetBtn');
+    var forgotMsg = document.getElementById('forgotMsg');
+
+    function openSettings() {
       settingsModal.style.display = 'flex';
       settingsModal.setAttribute('aria-hidden', 'false');
-    });
-    closeModal.addEventListener('click', function() {
-      settingsModal.style.display = 'none';
-      settingsModal.setAttribute('aria-hidden', 'true');
-      settingsMsg.textContent = '';
-    });
-    window.addEventListener('click', function(e) {
-      if (e.target === settingsModal) {
-        settingsModal.style.display = 'none';
-        settingsModal.setAttribute('aria-hidden', 'true');
-        settingsMsg.textContent = '';
-      }
-    });
 
+      // toggle forms based on auth
+      if (currentUser) {
+        modalTitle.textContent = 'Settings — Change Password';
+        changePwForm.style.display = 'block';
+        forgotPwForm.style.display = 'none';
+      } else {
+        modalTitle.textContent = 'Reset Password';
+        changePwForm.style.display = 'none';
+        forgotPwForm.style.display = 'block';
+      }
+    }
+
+    settingsBtn.addEventListener('click', openSettings);
+    closeModal.addEventListener('click', function() { settingsModal.style.display = 'none'; settingsMsg.textContent = ''; forgotMsg.textContent = ''; });
+    closeModal2.addEventListener('click', function() { settingsModal.style.display = 'none'; settingsMsg.textContent = ''; forgotMsg.textContent = ''; });
+    window.addEventListener('click', function(e) { if (e.target === settingsModal) { settingsModal.style.display = 'none'; settingsMsg.textContent = ''; forgotMsg.textContent = ''; } });
+
+    // Change password (logged-in)
     changePwBtn.addEventListener('click', function() {
       settingsMsg.style.color = '#f88';
       settingsMsg.textContent = '';
@@ -195,50 +249,45 @@
       var currentPassword = document.getElementById('currentPassword').value;
       var newPassword = document.getElementById('newPassword').value;
       var confirmPassword = document.getElementById('confirmPassword').value;
-      if (!currentPassword || !newPassword || !confirmPassword) {
-        settingsMsg.textContent = 'Fill all fields';
-        changePwBtn.disabled = false;
-        return;
-      }
-      if (newPassword !== confirmPassword) {
-        settingsMsg.textContent = 'New passwords do not match';
-        changePwBtn.disabled = false;
-        return;
-      }
+      if (!currentPassword || !newPassword || !confirmPassword) { settingsMsg.textContent = 'Fill all fields'; changePwBtn.disabled = false; return; }
+      if (newPassword !== confirmPassword) { settingsMsg.textContent = 'New passwords do not match'; changePwBtn.disabled = false; return; }
 
-      fetch('/api/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currentPassword: currentPassword, newPassword: newPassword })
-      }).then(function(res) {
-        return res.json().then(function(body) { return { ok: res.ok, body: body }; });
-      }).then(function(result) {
-        if (!result.ok) {
-          settingsMsg.textContent = result.body && (result.body.error || result.body.message) ? (result.body.error || result.body.message) : 'Failed to change password';
-        } else {
-          settingsMsg.style.color = '#8f8';
-          settingsMsg.textContent = 'Password changed successfully';
-          // clear inputs
-          document.getElementById('currentPassword').value = '';
-          document.getElementById('newPassword').value = '';
-          document.getElementById('confirmPassword').value = '';
-          setTimeout(function() {
-            settingsModal.style.display = 'none';
-            settingsMsg.style.color = '#f88';
-            settingsMsg.textContent = '';
-          }, 1200);
-        }
-      }).catch(function() {
-        settingsMsg.textContent = 'Network error';
-      }).finally(function() {
-        changePwBtn.disabled = false;
-      });
+      fetch('/api/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword: currentPassword, newPassword: newPassword }) })
+        .then(function(res) { return res.json().then(function(body) { return { ok: res.ok, body: body }; }); })
+        .then(function(result) {
+          if (!result.ok) {
+            settingsMsg.textContent = result.body && (result.body.error || result.body.message) ? (result.body.error || result.body.message) : 'Failed to change password';
+          } else {
+            settingsMsg.style.color = '#8f8';
+            settingsMsg.textContent = 'Password changed successfully';
+            document.getElementById('currentPassword').value = '';
+            document.getElementById('newPassword').value = '';
+            document.getElementById('confirmPassword').value = '';
+            setTimeout(function() { settingsModal.style.display = 'none'; settingsMsg.style.color = '#f88'; settingsMsg.textContent = ''; }, 1200);
+          }
+        }).catch(function() { settingsMsg.textContent = 'Network error'; })
+        .finally(function() { changePwBtn.disabled = false; });
+    });
+
+    // Forgot password (not logged-in)
+    sendResetBtn.addEventListener('click', function() {
+      forgotMsg.style.color = '#f88';
+      forgotMsg.textContent = '';
+      sendResetBtn.disabled = true;
+      var email = document.getElementById('forgotEmail').value;
+      if (!email) { forgotMsg.textContent = 'Enter your email'; sendResetBtn.disabled = false; return; }
+      fetch('/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email }) })
+        .then(function(res) { return res.text().then(function(t) { return { ok: res.ok, text: t }; }); })
+        .then(function(r) {
+          if (!r.ok) { forgotMsg.textContent = r.text || 'Failed'; } else { forgotMsg.style.color = '#8f8'; forgotMsg.textContent = 'If that email exists, a reset link has been sent.'; setTimeout(function(){ settingsModal.style.display='none'; forgotMsg.textContent=''; },1200); }
+        }).catch(function(){ forgotMsg.textContent = 'Network error'; })
+        .finally(function(){ sendResetBtn.disabled = false; });
     });
 
     // Initialization
     (function init() {
+      // load user & then members
       loadCurrentUser();
-      loadUsers();
     })();
   </script>
 </body>

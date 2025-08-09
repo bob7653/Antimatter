@@ -1,18 +1,5 @@
-/**
- * server.js — Full Antimatter backend (with rate limiting, verification resend,
- * password reset, /api/me, basic security headers and logging)
- *
- * NOTE: After updating, push to GitHub and redeploy on Render. Ensure Render
- * env vars are set:
- *  - SESSION_SECRET
- *  - EMAIL_USER
- *  - EMAIL_PASS
- *  - BASE_URL (https://antimatter-w9uh.onrender.com)
- *  - ADMIN_USERNAME, ADMIN_PASSWORD (optional)
- *  - DEBUG (optional: "true")
- *
- * Also: do NOT set PORT=3000 on Render. Remove any PORT override on Render.
- */
+/* server.js — updated: adds /api/user (returns null if not logged in),
+   keeps /api/me for compatibility. Other behavior unchanged. */
 
 require('dotenv').config();
 const express = require('express');
@@ -34,12 +21,8 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const app = express();
 
 /* ===== Basic security & logging ===== */
-app.use(helmet()); // sets many security headers incl HSTS in production if configured
-if (DEBUG) {
-  app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
-}
+app.use(helmet());
+if (DEBUG) app.use(morgan('dev')); else app.use(morgan('combined'));
 
 /* ===== Middleware ===== */
 app.use(express.urlencoded({ extended: true }));
@@ -54,7 +37,7 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    secure: (process.env.NODE_ENV === 'production'), // true in prod (HTTPS)
+    secure: (process.env.NODE_ENV === 'production'),
     httpOnly: true,
     sameSite: 'lax'
   }
@@ -63,14 +46,11 @@ app.use(session({
 /* ===== Database ===== */
 const DB_PATH = path.join(__dirname, 'users.db');
 const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('Failed to open DB:', err);
-    process.exit(1);
-  }
+  if (err) { console.error('Failed to open DB:', err); process.exit(1); }
   console.log('Opened DB:', DB_PATH);
 });
 
-/* Create users table if missing and password_resets for reset tokens */
+/* Create tables if missing */
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,9 +79,7 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     service: 'gmail',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
   });
-  transporter.verify().then(() => {
-    console.log('Nodemailer ready.');
-  }).catch((e) => {
+  transporter.verify().then(() => console.log('Nodemailer ready.')).catch((e) => {
     console.warn('Nodemailer verify failed:', e.message || e);
     transporter = null;
   });
@@ -125,22 +103,18 @@ function ensureAdmin(req, res, next) {
   next();
 }
 
-/* ===== Rate limiters ===== */
+/* ===== Rate limiter ===== */
 const authLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 8, // limit to 8 requests per minute
+  windowMs: 60 * 1000,
+  max: 8,
   message: { error: 'Too many requests, slow down' }
 });
 
-/* ===== Email helpers: verification and reset ===== */
+/* ===== Email helpers ===== */
 function sendVerification(email, token) {
   const url = `${BASE_URL}/verify/${token}`;
-  console.log(`[DEBUG] Verification URL: ${url}`); // helpful for logs
-
-  if (!transporter) {
-    console.log(`[DEV] Verification link for ${email}: ${url}`);
-    return Promise.resolve();
-  }
+  console.log(`[DEBUG] Verification URL: ${url}`);
+  if (!transporter) { console.log(`[DEV] Verification link for ${email}: ${url}`); return Promise.resolve(); }
   return transporter.sendMail({
     from: process.env.EMAIL_USER,
     to: email,
@@ -148,14 +122,10 @@ function sendVerification(email, token) {
     html: `<p>Please verify your Antimatter account by clicking <a href="${url}">this link</a>.</p>`
   });
 }
-
 function sendPasswordReset(email, token) {
   const url = `${BASE_URL}/reset-password?token=${token}`;
   console.log(`[DEBUG] Reset URL: ${url}`);
-  if (!transporter) {
-    console.log(`[DEV] Reset link for ${email}: ${url}`);
-    return Promise.resolve();
-  }
+  if (!transporter) { console.log(`[DEV] Reset link for ${email}: ${url}`); return Promise.resolve(); }
   return transporter.sendMail({
     from: process.env.EMAIL_USER,
     to: email,
@@ -164,24 +134,16 @@ function sendPasswordReset(email, token) {
   });
 }
 
-/* ===== Routes: Pages ===== */
-app.get('/', (req, res) => {
-  if (req.session.user) return res.redirect('/dashboard');
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+/* ===== Pages ===== */
+app.get('/', (req, res) => { if (req.session.user) return res.redirect('/dashboard'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 app.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
 app.get('/register', (req, res) => res.sendFile(path.join(__dirname, 'public', 'register.html')));
-app.get('/dashboard', (req, res) => {
-  if (!req.session.user) return res.redirect('/login');
-  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
+app.get('/dashboard', (req, res) => { if (!req.session.user) return res.redirect('/login'); res.sendFile(path.join(__dirname, 'public', 'dashboard.html')); });
 
-/* Inline admin page (unchanged behavior) */
+/* Inline admin page unchanged (keeps admin UI accessible) */
 app.get('/admin', (req, res) => {
   if (!req.session.user || !req.session.user.isAdmin) return res.redirect('/login');
-  res.send(`
-    <!doctype html><html><head><meta charset="utf-8"><title>Admin - Antimatter</title>
-    <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px}#userList{max-height:500px;overflow:auto;border:1px solid #ccc;padding:10px}.userRow{display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee}.userInfo{flex:1}button{padding:6px 10px}.highlight{background:#ffd}</style></head><body>
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>Admin - Antimatter</title><style>body{font-family:Arial,Helvetica,sans-serif;margin:20px}#userList{max-height:500px;overflow:auto;border:1px solid #ccc;padding:10px}.userRow{display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee}.userInfo{flex:1}button{padding:6px 10px}.highlight{background:#ffd}</style></head><body>
     <h1>Admin — Users</h1><p>Shows username, email, joinNumber and password hash. Use Kick to delete a user.</p>
     <div id="searchC"><label>Search by joinNumber:</label><input id="searchInput" type="number" min="1" style="width:120px"/></div>
     <div id="userList">Loading...</div>
@@ -216,25 +178,21 @@ app.get('/admin', (req, res) => {
       });
       fetchUsers();
     </script>
-    </body></html>
-  `);
+    </body></html>`);
 });
 
 /* ===== API endpoints ===== */
 
-/* Registration (rate-limited) */
+/* Registration */
 app.post('/register', authLimiter, (req, res) => {
   const { username, email, password } = req.body || {};
   if (!username || !email || !password) return res.status(400).send('Please fill out all fields.');
 
   nextJoinNumber((err, joinNumber) => {
     if (err) { console.error('joinNumber err', err); return res.status(500).send('DB error'); }
-
     bcrypt.hash(password, 10, (err, hash) => {
       if (err) { console.error('hash err', err); return res.status(500).send('Server error'); }
-
       const token = crypto.randomBytes(20).toString('hex');
-
       const sql = `INSERT INTO users (username, email, password, verified, verification_token, joinNumber, isAdmin)
                    VALUES (?, ?, ?, 0, ?, ?, 0)`;
       db.run(sql, [username, email, hash, token, joinNumber], function (err) {
@@ -243,19 +201,15 @@ app.post('/register', authLimiter, (req, res) => {
           if (err.message && err.message.includes('UNIQUE')) return res.status(409).send('Username or email already taken.');
           return res.status(500).send('Database error.');
         }
-
         sendVerification(email, token)
           .then(() => res.status(201).send('Registered. Verification email sent.'))
-          .catch(e => {
-            console.error('Send verify error:', e);
-            res.status(500).send('Registered but failed to send verification email.');
-          });
+          .catch(e => { console.error('Send verify error:', e); res.status(500).send('Registered but failed to send verification email.'); });
       });
     });
   });
 });
 
-/* Resend verification (by email) */
+/* Resend verification */
 app.post('/resend-verification', authLimiter, (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'Email required' });
@@ -289,12 +243,11 @@ app.get('/verify/:token', (req, res) => {
   });
 });
 
-/* Login (rate-limited) */
+/* Login */
 app.post('/login', authLimiter, (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).send('Please fill out all fields.');
 
-  // ENV admin shortcut
   const ADMIN_USER = process.env.ADMIN_USERNAME;
   const ADMIN_PASS = process.env.ADMIN_PASSWORD;
   if (ADMIN_USER && ADMIN_PASS && username === ADMIN_USER) {
@@ -322,20 +275,20 @@ app.post('/login', authLimiter, (req, res) => {
   });
 });
 
-/* Forgot password — generate reset token and email */
+/* Forgot password */
 app.post('/forgot-password', authLimiter, (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).send('Email required');
 
   db.get('SELECT id FROM users WHERE email = ?', [email], (err, user) => {
     if (err) return res.status(500).send('DB error');
-    if (!user) return res.status(200).send('If that email exists, a reset link has been sent.'); // generic response
+    if (!user) return res.status(200).send('If that email exists, a reset link has been sent.');
 
     const token = crypto.randomBytes(24).toString('hex');
-    const expiresAt = Date.now() + (60 * 60 * 1000); // 1 hour
+    const expiresAt = Date.now() + (60 * 60 * 1000);
 
     db.run('INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)', [user.id, token, expiresAt], function (err) {
-      if (err) { console.error('Reset insert err', err); /* still respond success-ish */ }
+      if (err) console.error('Reset insert err', err);
       sendPasswordReset(email, token).then(() => {
         res.status(200).send('If that email exists, a reset link has been sent.');
       }).catch(e => {
@@ -346,7 +299,7 @@ app.post('/forgot-password', authLimiter, (req, res) => {
   });
 });
 
-/* Reset password POST (token in body) */
+/* Reset password */
 app.post('/reset-password', authLimiter, (req, res) => {
   const { token, password } = req.body || {};
   if (!token || !password) return res.status(400).send('Missing fields');
@@ -355,17 +308,14 @@ app.post('/reset-password', authLimiter, (req, res) => {
     if (err) return res.status(500).send('DB error');
     if (!row) return res.status(400).send('Invalid or expired token');
     if (row.expires_at < Date.now()) {
-      // remove expired
       db.run('DELETE FROM password_resets WHERE id = ?', [row.id]);
       return res.status(400).send('Token expired');
     }
 
     bcrypt.hash(password, 10, (err, hash) => {
       if (err) return res.status(500).send('Server error');
-
       db.run('UPDATE users SET password = ? WHERE id = ?', [hash, row.user_id], function (err) {
         if (err) return res.status(500).send('DB error');
-        // delete used token
         db.run('DELETE FROM password_resets WHERE id = ?', [row.id]);
         res.send('Password reset successful. You can login now.');
       });
@@ -373,7 +323,31 @@ app.post('/reset-password', authLimiter, (req, res) => {
   });
 });
 
-/* API: current user for frontend (/api/me) */
+/* API: compatibility endpoint that returns logged-in user or null */
+app.get('/api/user', (req, res) => {
+  if (!req.session.user) return res.json(null);
+
+  // handle env-admin
+  if (req.session.user.id === 'env-admin') {
+    return res.json(req.session.user);
+  }
+
+  db.get('SELECT id, username, joinNumber, isAdmin FROM users WHERE id = ?', [req.session.user.id], (err, row) => {
+    if (err) { console.error('api/user db error', err); return res.status(500).json(null); }
+    if (!row) {
+      // fallback to session object
+      return res.json(req.session.user);
+    }
+    res.json({
+      id: row.id,
+      username: row.username,
+      joinNumber: row.joinNumber,
+      isAdmin: Number(row.isAdmin) === 1
+    });
+  });
+});
+
+/* Legacy /api/me kept for compatibility */
 app.get('/api/me', (req, res) => {
   if (!req.session.user) return res.json(null);
   res.json(req.session.user);
@@ -404,7 +378,7 @@ app.delete('/api/admin/users/:id', ensureAdmin, (req, res) => {
   });
 });
 
-/* Change password (logged-in user) */
+/* Change password */
 app.post('/api/change-password', ensureAuthenticated, (req, res) => {
   const userId = req.session.user.id;
   const { currentPassword, newPassword } = req.body || {};
@@ -450,7 +424,7 @@ app.use((req, res, next) => {
   next();
 });
 
-/* Start server */
+/* Start */
 app.listen(PORT, () => {
   console.log(`Antimatter server listening at ${BASE_URL} (port ${PORT})`);
   if (DEBUG) console.log('DEBUG mode ON');
