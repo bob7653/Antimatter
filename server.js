@@ -1,3 +1,19 @@
+/**
+ * server.js — Full Antimatter backend (with rate limiting, verification resend,
+ * password reset, /api/me, basic security headers and logging)
+ *
+ * NOTE: After updating, push to GitHub and redeploy on Render. Ensure Render
+ * env vars are set:
+ *  - SESSION_SECRET
+ *  - EMAIL_USER
+ *  - EMAIL_PASS
+ *  - BASE_URL (https://antimatter-w9uh.onrender.com)
+ *  - ADMIN_USERNAME, ADMIN_PASSWORD (optional)
+ *  - DEBUG (optional: "true")
+ *
+ * Also: do NOT set PORT=3000 on Render. Remove any PORT override on Render.
+ */
+
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -7,33 +23,30 @@ const SQLiteStore = require('connect-sqlite3')(session);
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const morgan = require('morgan');
 
 const PORT = Number(process.env.PORT) || 3000;
-const app = express();
 const DEBUG = process.env.DEBUG === 'true';
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Warn if BASE_URL missing
-if (!process.env.BASE_URL) {
-  console.warn('[WARN] BASE_URL environment variable not set! Defaulting to localhost.');
-  process.env.BASE_URL = `http://localhost:${PORT}`;
+const app = express();
+
+/* ===== Basic security & logging ===== */
+app.use(helmet()); // sets many security headers incl HSTS in production if configured
+if (DEBUG) {
+  app.use(morgan('dev'));
+} else {
+  app.use(morgan('combined'));
 }
 
-// --- Middleware ---
+/* ===== Middleware ===== */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Debug logger
-app.use((req, res, next) => {
-  if (DEBUG) {
-    console.log('---', req.method, req.url);
-    console.log('Cookies:', req.headers.cookie || '(none)');
-    console.log('Session before:', req.session);
-  }
-  next();
-});
-
-// Session (dev-friendly)
+/* ===== Session ===== */
 app.use(session({
   store: new SQLiteStore({ db: 'sessions.db', dir: '.' }),
   secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
@@ -41,13 +54,13 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    secure: false,
+    secure: (process.env.NODE_ENV === 'production'), // true in prod (HTTPS)
     httpOnly: true,
     sameSite: 'lax'
   }
 }));
 
-// --- Database ---
+/* ===== Database ===== */
 const DB_PATH = path.join(__dirname, 'users.db');
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
@@ -57,6 +70,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
   console.log('Opened DB:', DB_PATH);
 });
 
+/* Create users table if missing and password_resets for reset tokens */
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,52 +81,41 @@ db.serialize(() => {
     verification_token TEXT,
     joinNumber INTEGER UNIQUE,
     isAdmin INTEGER DEFAULT 0
-  )`, (err) => {
-    if (err) console.error('Create table error:', err);
-  });
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    token TEXT UNIQUE,
+    expires_at INTEGER,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  )`);
 });
 
-// --- Email (nodemailer) ---
+/* ===== Nodemailer (Gmail) ===== */
 let transporter = null;
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
   transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
   });
-  transporter.verify()
-    .then(() => console.log('Nodemailer ready.'))
-    .catch((e) => {
-      console.warn('Nodemailer verify failed:', e.message || e);
-      transporter = null;
-    });
+  transporter.verify().then(() => {
+    console.log('Nodemailer ready.');
+  }).catch((e) => {
+    console.warn('Nodemailer verify failed:', e.message || e);
+    transporter = null;
+  });
 } else {
   console.log('EMAIL_USER / EMAIL_PASS not set — email disabled (dev).');
 }
 
-function sendVerification(email, token) {
-  const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
-  console.log(`[DEBUG] Using BASE_URL: ${baseUrl}`); // Debug line added
-  const url = `${baseUrl}/verify/${token}`;
-  if (!transporter) {
-    console.log('[DEV] Verification link:', url);
-    return Promise.resolve();
-  }
-  return transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'Antimatter — Verify your email',
-    html: `<p>Please verify your Antimatter account: <a href="${url}">${url}</a></p>`
-  });
-}
-
-// --- Helpers ---
+/* ===== Helpers ===== */
 function nextJoinNumber(cb) {
   db.get('SELECT MAX(joinNumber) AS m FROM users', (err, row) => {
     if (err) return cb(err);
     cb(null, (row && row.m) ? row.m + 1 : 1);
   });
 }
-
 function ensureAuthenticated(req, res, next) {
   if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
   next();
@@ -122,39 +125,65 @@ function ensureAdmin(req, res, next) {
   next();
 }
 
-// --- Routes: Pages ---
+/* ===== Rate limiters ===== */
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 8, // limit to 8 requests per minute
+  message: { error: 'Too many requests, slow down' }
+});
+
+/* ===== Email helpers: verification and reset ===== */
+function sendVerification(email, token) {
+  const url = `${BASE_URL}/verify/${token}`;
+  console.log(`[DEBUG] Verification URL: ${url}`); // helpful for logs
+
+  if (!transporter) {
+    console.log(`[DEV] Verification link for ${email}: ${url}`);
+    return Promise.resolve();
+  }
+  return transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Antimatter — Verify your email',
+    html: `<p>Please verify your Antimatter account by clicking <a href="${url}">this link</a>.</p>`
+  });
+}
+
+function sendPasswordReset(email, token) {
+  const url = `${BASE_URL}/reset-password?token=${token}`;
+  console.log(`[DEBUG] Reset URL: ${url}`);
+  if (!transporter) {
+    console.log(`[DEV] Reset link for ${email}: ${url}`);
+    return Promise.resolve();
+  }
+  return transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Antimatter — Password reset',
+    html: `<p>Reset your password by clicking <a href="${url}">this link</a>. It expires in 1 hour.</p>`
+  });
+}
+
+/* ===== Routes: Pages ===== */
 app.get('/', (req, res) => {
   if (req.session.user) return res.redirect('/dashboard');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 app.get('/login', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
 app.get('/register', (req, res) => res.sendFile(path.join(__dirname, 'public', 'register.html')));
-
-// Dashboard page (for logged-in users)
 app.get('/dashboard', (req, res) => {
   if (!req.session.user) return res.redirect('/login');
   res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
-// Admin page (serves inline admin UI)
+/* Inline admin page (unchanged behavior) */
 app.get('/admin', (req, res) => {
   if (!req.session.user || !req.session.user.isAdmin) return res.redirect('/login');
-
-  // Inline admin HTML (keeps one-file server)
   res.send(`
     <!doctype html><html><head><meta charset="utf-8"><title>Admin - Antimatter</title>
-    <style>
-      body{font-family:Arial,Helvetica,sans-serif;margin:20px}
-      #userList{max-height:500px;overflow:auto;border:1px solid #ccc;padding:10px}
-      .userRow{display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee}
-      .userInfo{flex:1}
-      button{padding:6px 10px}
-      .highlight{background:#ffd}
-    </style></head><body>
-    <h1>Admin — Users</h1>
-    <p>Shows username, email, joinNumber and password hash. Use Kick to delete a user.</p>
-    <div id="searchC"><label>Search by joinNumber:</label>
-      <input id="searchInput" type="number" min="1" style="width:120px"/></div>
+    <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px}#userList{max-height:500px;overflow:auto;border:1px solid #ccc;padding:10px}.userRow{display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee}.userInfo{flex:1}button{padding:6px 10px}.highlight{background:#ffd}</style></head><body>
+    <h1>Admin — Users</h1><p>Shows username, email, joinNumber and password hash. Use Kick to delete a user.</p>
+    <div id="searchC"><label>Search by joinNumber:</label><input id="searchInput" type="number" min="1" style="width:120px"/></div>
     <div id="userList">Loading...</div>
     <script>
       async function fetchUsers(){
@@ -167,8 +196,7 @@ app.get('/admin', (req, res) => {
         const c = document.getElementById('userList'); c.innerHTML='';
         users.forEach(u=>{
           const row = document.createElement('div'); row.className='userRow'; row.id='user-'+u.id;
-          row.innerHTML = '<div class="userInfo"><b>'+u.username+'</b> | '+u.email+' | Join#: '+u.joinNumber+
-            '<br/><small style="font-family:monospace">'+u.password+'</small></div>';
+          row.innerHTML = '<div class="userInfo"><b>'+u.username+'</b> | '+u.email+' | Join#: '+u.joinNumber+'<br/><small style="font-family:monospace">'+u.password+'</small></div>';
           const btn = document.createElement('button'); btn.textContent='Kick';
           btn.addEventListener('click', async ()=> {
             if(!confirm("Delete "+u.username+"?")) return;
@@ -192,8 +220,10 @@ app.get('/admin', (req, res) => {
   `);
 });
 
-// --- Register (POST) ---
-app.post('/register', (req, res) => {
+/* ===== API endpoints ===== */
+
+/* Registration (rate-limited) */
+app.post('/register', authLimiter, (req, res) => {
   const { username, email, password } = req.body || {};
   if (!username || !email || !password) return res.status(400).send('Please fill out all fields.');
 
@@ -204,93 +234,224 @@ app.post('/register', (req, res) => {
       if (err) { console.error('hash err', err); return res.status(500).send('Server error'); }
 
       const token = crypto.randomBytes(20).toString('hex');
-      const autoVerify = false; // require verification explicitly
 
-      const sql = `INSERT INTO users (username, email, password, verified, verification_token, joinNumber)
-                   VALUES (?, ?, ?, ?, ?, ?)`;
-      db.run(sql, [username, email, hash, autoVerify ? 1 : 0, autoVerify ? null : token, joinNumber], function(err) {
+      const sql = `INSERT INTO users (username, email, password, verified, verification_token, joinNumber, isAdmin)
+                   VALUES (?, ?, ?, 0, ?, ?, 0)`;
+      db.run(sql, [username, email, hash, token, joinNumber], function (err) {
         if (err) {
           console.error('Insert user error:', err.message);
-          if (err.message.includes('UNIQUE')) return res.status(400).send('Username or email already taken.');
-          return res.status(500).send('DB error');
+          if (err.message && err.message.includes('UNIQUE')) return res.status(409).send('Username or email already taken.');
+          return res.status(500).send('Database error.');
         }
-        if (!autoVerify) {
-          sendVerification(email, token).catch(e => console.error('Email send error:', e));
-        }
-        res.send('Registration successful! Please check your email for verification link.');
+
+        sendVerification(email, token)
+          .then(() => res.status(201).send('Registered. Verification email sent.'))
+          .catch(e => {
+            console.error('Send verify error:', e);
+            res.status(500).send('Registered but failed to send verification email.');
+          });
       });
     });
   });
 });
 
-// --- Verify email link ---
-app.get('/verify/:token', (req, res) => {
-  const token = req.params.token;
-  db.get('SELECT id, verified FROM users WHERE verification_token = ?', [token], (err, user) => {
-    if (err) return res.status(500).send('DB error');
-    if (!user) return res.status(400).send('Invalid verification link.');
-    if (user.verified) return res.send('Your account is already verified.');
+/* Resend verification (by email) */
+app.post('/resend-verification', authLimiter, (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'Email required' });
 
-    db.run('UPDATE users SET verified=1, verification_token=NULL WHERE id = ?', [user.id], err => {
-      if (err) return res.status(500).send('DB error');
-      res.send('Email verified! You can now log in.');
+  db.get('SELECT id, verified FROM users WHERE email = ?', [email], (err, user) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.verified) return res.json({ ok: true, message: 'Already verified' });
+
+    const token = crypto.randomBytes(20).toString('hex');
+    db.run('UPDATE users SET verification_token = ? WHERE id = ?', [token, user.id], (err) => {
+      if (err) return res.status(500).json({ error: 'DB error' });
+      sendVerification(email, token).then(() => res.json({ ok: true })).catch(e => { console.error(e); res.status(500).json({ error: 'Email failed' }); });
     });
   });
 });
 
-// --- Login (POST) ---
-app.post('/login', (req, res) => {
+/* Verify link */
+app.get('/verify/:token', (req, res) => {
+  const token = req.params.token;
+  if (!token) return res.status(400).send('Missing token.');
+
+  db.get('SELECT id, verified FROM users WHERE verification_token = ?', [token], (err, row) => {
+    if (err) return res.status(500).send('DB error');
+    if (!row) return res.status(400).send('<p>Invalid or expired token.</p><p><a href="/login">Back</a></p>');
+    if (row.verified) return res.send('<p>Already verified.</p><p><a href="/login">Login</a></p>');
+    db.run('UPDATE users SET verified = 1, verification_token = NULL WHERE id = ?', [row.id], (err) => {
+      if (err) return res.status(500).send('DB error');
+      res.send('<p>Verified! <a href="/login">Login</a></p>');
+    });
+  });
+});
+
+/* Login (rate-limited) */
+app.post('/login', authLimiter, (req, res) => {
   const { username, password } = req.body || {};
-  if (!username || !password) return res.status(400).send('Missing username or password.');
+  if (!username || !password) return res.status(400).send('Please fill out all fields.');
+
+  // ENV admin shortcut
+  const ADMIN_USER = process.env.ADMIN_USERNAME;
+  const ADMIN_PASS = process.env.ADMIN_PASSWORD;
+  if (ADMIN_USER && ADMIN_PASS && username === ADMIN_USER) {
+    if (password === ADMIN_PASS) {
+      req.session.user = { id: 'env-admin', username: ADMIN_USER, isAdmin: true, joinNumber: null };
+      return req.session.save(err => { if (err) { console.error('sess save', err); return res.status(500).send('err'); } return res.redirect('/admin'); });
+    } else return res.status(400).send('Invalid username or password.');
+  }
 
   db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
     if (err) return res.status(500).send('DB error');
     if (!user) return res.status(400).send('Invalid username or password.');
-    if (!user.verified) return res.status(400).send('Please verify your email first.');
+    if (!user.verified) return res.status(403).send('Please verify your email first.');
 
     bcrypt.compare(password, user.password, (err, match) => {
       if (err) return res.status(500).send('Server error');
       if (!match) return res.status(400).send('Invalid username or password.');
 
-      req.session.user = {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        isAdmin: user.isAdmin === 1,
-        joinNumber: user.joinNumber
-      };
-      res.send('Login successful!');
+      req.session.user = { id: user.id, username: user.username, isAdmin: Number(user.isAdmin) === 1, joinNumber: user.joinNumber };
+      req.session.save(err => {
+        if (err) { console.error('sess save error', err); return res.status(500).send('Server error'); }
+        return res.redirect(user.isAdmin === 1 ? '/admin' : '/dashboard');
+      });
     });
   });
 });
 
-// --- Logout ---
-app.post('/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.send('Logged out');
+/* Forgot password — generate reset token and email */
+app.post('/forgot-password', authLimiter, (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).send('Email required');
+
+  db.get('SELECT id FROM users WHERE email = ?', [email], (err, user) => {
+    if (err) return res.status(500).send('DB error');
+    if (!user) return res.status(200).send('If that email exists, a reset link has been sent.'); // generic response
+
+    const token = crypto.randomBytes(24).toString('hex');
+    const expiresAt = Date.now() + (60 * 60 * 1000); // 1 hour
+
+    db.run('INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)', [user.id, token, expiresAt], function (err) {
+      if (err) { console.error('Reset insert err', err); /* still respond success-ish */ }
+      sendPasswordReset(email, token).then(() => {
+        res.status(200).send('If that email exists, a reset link has been sent.');
+      }).catch(e => {
+        console.error('Password reset email error', e);
+        res.status(500).send('Failed to send reset email.');
+      });
+    });
   });
 });
 
-// --- API: Admin users list ---
-app.get('/api/admin/users', ensureAdmin, (req, res) => {
-  db.all('SELECT id, username, email, password, joinNumber FROM users ORDER BY joinNumber ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'DB error' });
+/* Reset password POST (token in body) */
+app.post('/reset-password', authLimiter, (req, res) => {
+  const { token, password } = req.body || {};
+  if (!token || !password) return res.status(400).send('Missing fields');
+
+  db.get('SELECT * FROM password_resets WHERE token = ?', [token], (err, row) => {
+    if (err) return res.status(500).send('DB error');
+    if (!row) return res.status(400).send('Invalid or expired token');
+    if (row.expires_at < Date.now()) {
+      // remove expired
+      db.run('DELETE FROM password_resets WHERE id = ?', [row.id]);
+      return res.status(400).send('Token expired');
+    }
+
+    bcrypt.hash(password, 10, (err, hash) => {
+      if (err) return res.status(500).send('Server error');
+
+      db.run('UPDATE users SET password = ? WHERE id = ?', [hash, row.user_id], function (err) {
+        if (err) return res.status(500).send('DB error');
+        // delete used token
+        db.run('DELETE FROM password_resets WHERE id = ?', [row.id]);
+        res.send('Password reset successful. You can login now.');
+      });
+    });
+  });
+});
+
+/* API: current user for frontend (/api/me) */
+app.get('/api/me', (req, res) => {
+  if (!req.session.user) return res.json(null);
+  res.json(req.session.user);
+});
+
+/* API: list users (dashboard) */
+app.get('/api/users', ensureAuthenticated, (req, res) => {
+  db.all('SELECT id, username, joinNumber FROM users ORDER BY joinNumber ASC', (err, rows) => {
+    if (err) { console.error('users fetch', err); return res.status(500).json({ error: 'DB error' }); }
     res.json(rows);
   });
 });
 
-// --- API: Admin delete user ---
+/* Admin endpoints */
+app.get('/api/admin/users', ensureAdmin, (req, res) => {
+  db.all('SELECT id, username, email, password, joinNumber FROM users ORDER BY joinNumber ASC', (err, rows) => {
+    if (err) { console.error('admin users', err); return res.status(500).json({ error: 'DB error' }); }
+    res.json(rows);
+  });
+});
 app.delete('/api/admin/users/:id', ensureAdmin, (req, res) => {
   const id = Number(req.params.id);
-  if (!id) return res.status(400).json({ error: 'Invalid user id' });
-  db.run('DELETE FROM users WHERE id = ?', [id], function(err) {
-    if (err) return res.status(500).json({ error: 'DB error' });
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  db.run('DELETE FROM users WHERE id = ?', [id], function (err) {
+    if (err) { console.error('admin delete', err); return res.status(500).json({ error: 'DB error' }); }
     if (this.changes === 0) return res.status(404).json({ error: 'User not found' });
-    res.json({ success: true });
+    res.json({ ok: true });
   });
 });
 
-// --- Start server ---
+/* Change password (logged-in user) */
+app.post('/api/change-password', ensureAuthenticated, (req, res) => {
+  const userId = req.session.user.id;
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Missing fields' });
+
+  db.get('SELECT password FROM users WHERE id = ?', [userId], (err, row) => {
+    if (err) { console.error('get pw', err); return res.status(500).json({ error: 'DB error' }); }
+    if (!row) return res.status(404).json({ error: 'User not found' });
+
+    bcrypt.compare(currentPassword, row.password, (err, match) => {
+      if (err) { console.error('bcrypt compare', err); return res.status(500).json({ error: 'Server error' }); }
+      if (!match) return res.status(400).json({ error: 'Current password incorrect' });
+
+      bcrypt.hash(newPassword, 10, (err, hash) => {
+        if (err) { console.error('hash new', err); return res.status(500).json({ error: 'Server error' }); }
+        db.run('UPDATE users SET password = ? WHERE id = ?', [hash, userId], function(err) {
+          if (err) { console.error('update pw', err); return res.status(500).json({ error: 'DB error' }); }
+          res.json({ ok: true, message: 'Password changed successfully' });
+        });
+      });
+    });
+  });
+});
+
+/* whoami debug */
+app.get('/whoami', (req, res) => res.json({ session: req.session || null }));
+
+/* logout */
+app.post('/logout', (req, res) => {
+  req.session.destroy(err => {
+    if (err) { console.error('logout', err); return res.status(500).json({ error: 'Logout failed' }); }
+    res.clearCookie('connect.sid');
+    res.json({ ok: true, redirect: '/login' });
+  });
+});
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => { res.clearCookie('connect.sid'); res.redirect('/login'); });
+});
+
+/* Final debug middleware */
+app.use((req, res, next) => {
+  if (DEBUG) console.log('Session after:', req.session);
+  next();
+});
+
+/* Start server */
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Antimatter server listening at ${BASE_URL} (port ${PORT})`);
+  if (DEBUG) console.log('DEBUG mode ON');
 });
