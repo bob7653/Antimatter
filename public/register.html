@@ -1,32 +1,106 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Register — Antimatter</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Register — Antimatter</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* small inline tweaks so it looks okay standalone */
+    .small-note { color:#9aa0a6; font-size:0.9rem; margin-top:8px; }
+    .success { color:#8f8; }
+    .error { color:#f88; background:#ff5858; color:white; padding:8px; border-radius:6px; margin-bottom:10px; }
+  </style>
+</head>
 <body>
-  <form id="register" class="center-card" method="POST" action="/register">
-    <h2>Register</h2>
-    <div id="err" class="error" style="display:none;"></div>
-    <input name="username" type="text" placeholder="Choose username" required />
-    <input name="email" type="email" placeholder="Email (for verification)" required />
-    <input name="password" type="password" placeholder="Choose password" required />
-    <button type="submit">Create account</button>
-    <div class="muted">Already registered? <a href="/login">Login</a></div>
-  </form>
+  <main class="center-card" role="main" aria-labelledby="title">
+    <h2 id="title">Register</h2>
+
+    <div id="err" class="error" style="display:none;" aria-live="polite"></div>
+
+    <form id="register" novalidate>
+      <input id="username" name="username" type="text" placeholder="Choose username" required autocomplete="username" />
+      <input id="email" name="email" type="email" placeholder="Email (for verification)" required autocomplete="email" />
+      <input id="password" name="password" type="password" placeholder="Choose password (min 6 chars)" required autocomplete="new-password" />
+      <button id="submitBtn" type="submit">Create account</button>
+    </form>
+
+    <p id="note" class="small-note">Already registered? <a href="/login">Login</a></p>
+    <p id="success" class="small-note" style="display:none" aria-live="polite"></p>
+  </main>
 
   <script>
-    const form = document.getElementById('register');
-    const err = document.getElementById('err');
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      err.style.display = 'none';
-      const res = await fetch('/register', { method: 'POST', body: new URLSearchParams(new FormData(form)) });
-      if (!res.ok) {
-        const text = await res.text();
-        err.textContent = text;
-        err.style.display = 'block';
-      } else {
-        // server may redirect to dashboard for auto-verified case, handle both
-        // try go to dashboard
-        window.location.href = '/dashboard';
+    (function () {
+      const form = document.getElementById('register');
+      const errEl = document.getElementById('err');
+      const successEl = document.getElementById('success');
+      const submitBtn = document.getElementById('submitBtn');
+
+      function showError(msg) {
+        errEl.style.display = 'block';
+        errEl.textContent = msg;
       }
-    });
+      function clearError() {
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+      }
+      function showSuccess(msg) {
+        successEl.style.display = 'block';
+        successEl.className = 'small-note success';
+        successEl.textContent = msg;
+      }
+
+      function isValidEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        clearError();
+        successEl.style.display = 'none';
+        const username = (document.getElementById('username').value || '').trim();
+        const email = (document.getElementById('email').value || '').trim();
+        const password = (document.getElementById('password').value || '');
+
+        if (!username || !email || !password) { showError('Please fill out all fields.'); return; }
+        if (!isValidEmail(email)) { showError('Please enter a valid email.'); return; }
+        if (password.length < 6) { showError('Password must be at least 6 characters.'); return; }
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating…';
+
+        try {
+          // send as urlencoded form (server expects urlencoded)
+          const body = new URLSearchParams();
+          body.append('username', username);
+          body.append('email', email);
+          body.append('password', password);
+
+          const res = await fetch('/register', {
+            method: 'POST',
+            body: body
+          });
+
+          const text = await res.text();
+
+          if (res.status === 201 || res.ok) {
+            // registration accepted — typically verification required
+            showSuccess('Registered — verification email sent. Check your inbox. ');
+            // show helpful link
+            successEl.innerHTML = 'Registered — verification email sent. <a href="/login">Go to login</a>';
+            // clear form
+            form.reset();
+          } else {
+            // show server-provided message when possible
+            showError(text || 'Registration failed. Try again later.');
+          }
+        } catch (err) {
+          console.error('Register error', err);
+          showError('Network error — please try again.');
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Create account';
+        }
+      });
+    })();
   </script>
-</body></html>
+</body>
+</html>
