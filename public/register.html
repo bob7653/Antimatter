@@ -1,59 +1,32 @@
-app.post('/register', async (req, res) => {
-  const { username, email, password } = req.body || {};
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Register - Antimatter</title>
+</head>
+<body>
+  <h1>Register</h1>
+  <form id="registerForm" action="/register" method="POST">
+    <label>
+      Username:
+      <input type="text" name="username" required minlength="3" maxlength="30" />
+    </label>
+    <br />
 
-  // Basic validation
-  if (!username || !email || !password) {
-    return res.status(400).send('Please fill out all fields.');
-  }
-  if (password.length < 6) {
-    return res.status(400).send('Password must be at least 6 characters.');
-  }
-  // Simple email regex validation, optional here because frontend already checks it
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).send('Invalid email format.');
-  }
+    <label>
+      Email:
+      <input type="email" name="email" required />
+    </label>
+    <br />
 
-  try {
-    // Check if username or email already exists
-    db.get('SELECT id FROM users WHERE username = ? OR email = ?', [username, email], (err, existingUser) => {
-      if (err) {
-        console.error('DB error:', err);
-        return res.status(500).send('Database error');
-      }
-      if (existingUser) {
-        return res.status(400).send('Username or email already taken.');
-      }
+    <label>
+      Password:
+      <input type="password" name="password" required minlength="6" />
+    </label>
+    <br />
 
-      // Hash password
-      bcrypt.hash(password, 10, (err, hashedPassword) => {
-        if (err) {
-          console.error('Bcrypt error:', err);
-          return res.status(500).send('Server error');
-        }
-
-        // Insert new user with verified = 0 (pending verification)
-        const stmt = db.prepare('INSERT INTO users (username, email, password, verified, isAdmin, joinNumber) VALUES (?, ?, ?, 0, 0, NULL)');
-        stmt.run(username, email, hashedPassword, function (err) {
-          if (err) {
-            console.error('DB insert error:', err);
-            return res.status(500).send('Database error');
-          }
-
-          const userId = this.lastID;
-
-          // Here: send verification email with a token
-          // (You’ll need to implement or integrate your email system and token generation)
-          // For now, simulate by logging:
-          console.log(`Send verification email to ${email} with token for user ID ${userId}`);
-
-          // Respond success, 201 Created
-          res.status(201).send('Registered. Verification email sent.');
-        });
-      });
-    });
-  } catch (e) {
-    console.error('Unexpected error:', e);
-    res.status(500).send('Server error');
-  }
-});
+    <button type="submit">Register</button>
+  </form>
+</body>
+</html>
